@@ -1,0 +1,4 @@
+packages:
+  - "web"
+# Evita el error ERR_PNPM_IGNORED_BUILDS de pnpm nuevos con paquetes que traen scripts de instalación.
+strictDepBuilds: false
