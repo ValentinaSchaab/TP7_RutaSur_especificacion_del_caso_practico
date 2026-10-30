@@ -1,135 +1,42 @@
-# RutaSur — seguimiento de envíos orientado a eventos
+# TP7 - RutaSur
 
-Plataforma de seguimiento de envíos en tiempo real para un operador de última milla ficticio.
-**Hipótesis:** si cada cambio de estado de un envío es un evento, la empresa puede intervenir durante la
-operación en lugar de analizar fracasos al día siguiente.
+## Sobre el proyecto
 
-```
-Simulador ──▶ Kafka (6 topics) ──▶ Proyector · Notificaciones · Reprogramación · Monitor de SLA · Analítica
-                                              │ (tres de ellos publican eventos propios)
-                                              ▼
-                                   MongoDB (vistas de lectura) ──▶ Next.js (etapa 2)
-```
-Kafka es el único punto de contacto entre servicios: ninguno llama a otro. Cada servicio es un proceso
-Node.js separado y un consumer group independiente.
+El objetivo es poder hacer un seguimiento de los envíos y controlar qué pasa con cada uno durante todo su recorrido, desde que se crea hasta que se entrega.
 
-## Requisitos
-Docker Desktop abierto. Para correr las pruebas automáticas: Node.js 20+ y pnpm.
+También se tienen en cuenta las situaciones en las que una entrega falla, hay demoras o es necesario volver a programar un intento de entrega.
 
-## Arranque (un solo comando)
+## ¿Cómo funciona el sistema?
 
-> Si tenés levantado otro proyecto con Kafka/Mongo (por ejemplo el TP6), apagalo antes: `docker compose down`
-> en esa carpeta. Usan los mismos puertos (9092, 27017, 8080).
+El proyecto está dividido en varios servicios. Cada uno tiene una función diferente y se comunican entre ellos utilizando Kafka.
 
-```powershell
-docker compose up -d --build
-docker compose ps -a
-```
-La primera vez tarda varios minutos (construye la imagen). El simulador empieza solo el flujo continuo.
+Los servicios que forman parte del proyecto son:
 
-| Qué | Dónde |
-|---|---|
-| Kafka UI (topics, mensajes, lag, DLQ) | http://localhost:8080 |
-| API de control del simulador | http://localhost:4000/status |
-| MongoDB | `mongodb://localhost:27017/rutasur?directConnection=true` |
+- **Simulador:** genera los envíos y los eventos que van ocurriendo.
+- **Proyector:** recibe los eventos y actualiza la información de los envíos en MongoDB.
+- **Notificaciones:** se encarga de generar avisos cuando ocurre algún problema o situación importante.
+- **Reprogramación:** se ocupa de organizar un nuevo intento de entrega cuando una entrega falla.
+- **Monitor SLA:** controla los tiempos de entrega y genera alertas cuando se detectan demoras.
+- **Analítica:** obtiene información de los envíos y calcula distintos indicadores.
 
-Para **repetir la demo desde cero**: `docker compose down -v` (borra Kafka y Mongo) y volver a levantar.
-Reiniciar solo el simulador reinicia su reloj simulado, mientras que el monitor de SLA conserva el suyo: no lo hagas
-en medio de una demo.
+La información se guarda en MongoDB y Kafka se utiliza para que los servicios puedan comunicarse mediante eventos.
 
-## Catálogo de eventos
-| Topic | Produce | Consume (grupo) | Retención |
-|---|---|---|---|
-| `envios.estados` | simulador | proyector, monitor-sla, notificaciones, reprogramacion, analitica | 30 días |
-| `envios.promesas` | simulador | monitor-sla | compactado |
-| `envios.reprogramaciones` | reprogramación | proyector | 30 días |
-| `alertas.sla` | monitor de SLA | proyector, notificaciones | 7 días |
-| `notificaciones.enviadas` | notificaciones | proyector | 7 días |
-| `envios.estados.dlq` | cualquier consumidor | revisión manual | 30 días |
+## Escenarios del simulador
 
-Clave de partición: siempre `shipmentId` (orden por envío). `envios.estados` tiene 3 particiones.
+Para probar el funcionamiento del sistema se pueden ejecutar distintos escenarios:
 
-## Dónde está cada cosa
-```
-src/lib/          esquemas (zod), bus Kafka (kafkajs, aislado en una clase), consumidor con idempotencia/reintentos/DLQ, tiempo simulado
-src/services/     proyector, notificaciones, reprogramacion, monitor-sla, analitica, analitica-tiempos (4.º indicador)
-src/simulador/    generador con semilla fija + API de control
-src/tools/        recuento.ts: recálculo independiente de los indicadores
-test/e2e.js       prueba de punta a punta (26 verificaciones)
-```
+- **Feliz:** el envío realiza todo el recorrido y llega correctamente al destinatario.
+- **Ausente:** el destinatario no se encuentra y se debe reprogramar la entrega.
+- **Demorado:** el envío presenta una demora y se pueden generar alertas por los tiempos de entrega.
+- **Tercer fallo:** el envío tiene tres intentos fallidos y se marca para devolución.
+- **Ráfaga:** genera varios envíos para probar el funcionamiento del sistema con más eventos.
 
-## Cómo se cumplen las decisiones de diseño
-- **Al menos una vez + idempotencia:** el `eventId` se guarda en `eventos_procesados` (índice único
-  `consumidor + eventId`, TTL 7 días) **en la misma transacción de MongoDB** que el efecto. Los eventos que un
-  servicio publica en respuesta usan un `eventId` determinístico, así un reproceso no genera duplicados.
-- **Commit de offsets manual**, después de escribir en MongoDB (`autoCommit: false`).
-- **JSON con validación de esquema** (zod) en cada consumidor. Un evento inválido va a `envios.estados.dlq` con el motivo
-  en los headers (`x-error`, `x-topic-origen`, `x-particion`, `x-offset`, `x-grupo`). Un error técnico se reintenta 3 veces
-  (1 s, 2 s, 4 s) y luego va a la DLQ. El proyector es el que envía los inválidos a la DLQ (los demás los omiten con un
-  aviso en el log), para no multiplicar copias del mismo mensaje.
-- **Monitor de SLA:** consumidor con estado en memoria respaldado en MongoDB (`sla_estado`, `sla_emitidas`, `sla_reloj`).
-  Usa el **reloj simulado que viaja en los eventos** (entre eventos avanza con el factor de aceleración) y revisa todos
-  los envíos abiertos cada minuto (`SLA_TICK_MS`, 60 000 por defecto).
-- **MongoDB es una vista:** el historial va embebido en `envios`; `metricas_diarias` se actualiza con `$inc` atómicos.
-- **Desviaciones menores respecto del documento** (decisiones propias, para poder justificarlas):
-  - Los eventos de `envios.estados` llevan también `promesaVenceEn` (desnormalizado) para que el proyector y la analítica
-    no tengan que cruzar dos topics; el monitor de SLA sí consume `envios.promesas`, como indica el catálogo.
-  - `ZONA_INACCESIBLE` no tiene regla en el documento: se reprograma al día hábil siguiente en la misma franja.
-  - Todas las colecciones viven en una sola base (`rutasur`), porque Next.js lee de ahí.
+También se realizan pruebas con eventos duplicados, eventos fuera de orden y mensajes incorrectos.
 
-## Probar el sistema
-### Disparar los escenarios (desde PowerShell)
-```powershell
-Invoke-RestMethod -Method Post http://localhost:4000/scenarios/feliz
-Invoke-RestMethod -Method Post http://localhost:4000/scenarios/ausente
-Invoke-RestMethod -Method Post http://localhost:4000/scenarios/demorado
-Invoke-RestMethod -Method Post http://localhost:4000/scenarios/tercer-fallo
-Invoke-RestMethod -Method Post http://localhost:4000/scenarios/rafaga      # 500 envíos
-Invoke-RestMethod -Method Post http://localhost:4000/inject/malformado      # evento inválido -> DLQ
-```
-La respuesta muestra el id del primer envío (`DEMO-FELIZ-XXXX-01`). Para verlo en MongoDB:
-```powershell
-docker compose exec mongo mongo rutasur --quiet --eval 'db.envios.find({_id:/DEMO-FELIZ/}).pretty()'
-docker compose exec mongo mongo rutasur --quiet --eval 'db.alertas.find({estado:"ABIERTA"}).sort({prioridad:1}).limit(5).pretty()'
-```
-### Lag de un grupo de consumidores
-```powershell
-docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:19092 --describe --group notificaciones
-```
-### Caída de un servicio
-```powershell
-docker compose stop notificaciones     # el tracking y las alertas siguen; el lag del grupo crece
-docker compose start notificaciones    # procesa lo pendiente sin duplicar avisos
-```
-### Indicadores vs. recuento manual
-```powershell
-docker compose run --rm proyector node dist/tools/recuento.js
-```
-### 4.º indicador y reprocesamiento
-```powershell
-docker compose --profile reproceso up -d analitica-tiempos   # grupo NUEVO: lee envios.estados desde el inicio
-docker compose exec mongo mongo rutasur --quiet --eval 'db.metricas_diarias.aggregate([{$group:{_id:"$hubId",n:{$sum:"$tiempoHub.cantidad"},ms:{$sum:"$tiempoHub.sumaMs"}}}])'
-```
-### Reconstruir `envios` desde Kafka
-```powershell
-docker compose stop proyector
-docker compose exec mongo mongo rutasur --quiet --eval 'db.envios.drop(); db.alertas.drop(); db.notificaciones.drop(); db.eventos_procesados.deleteMany({consumidor:"proyector"})'
-docker compose exec kafka /opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server localhost:19092 --group proyector --reset-offsets --to-earliest --all-topics --execute
-docker compose start proyector
-```
-(Hay que borrar también `eventos_procesados` del proyector; si no, los eventos se descartarían como ya aplicados.)
+## Pruebas realizadas
 
-### Pruebas automáticas
-Con Mongo arriba (`docker compose up -d mongo`), en la carpeta del proyecto:
-```powershell
-pnpm install
-pnpm run build
-pnpm test
-```
-Levanta los servicios reales contra MongoDB real con un bus en memoria y verifica los criterios de aceptación.
-Solo usa la base `rutasur_test`.
+Se realizaron pruebas para verificar que los distintos servicios funcionen correctamente y que se cumplan los casos planteados en el trabajo práctico.
 
-## Parámetros del simulador (variables de entorno)
-`SIM_SEED` (42), `SIM_ENVIOS_POR_MINUTO` (20), `SIM_FACTOR` (120 → 1 hora simulada = 30 s),
-`SIM_P_DEMORA_HUB` (0.10), `SIM_P_DUPLICADO` (0.02), `SIM_P_FUERA_DE_ORDEN` (0.02), `SIM_P_MALFORMADO` (0.01).
-Las 6 zonas tienen tasas de fallo de 5 % a 30 %; los motivos se distribuyen 60/20/15/5.
+Se probaron los recorridos de los envíos, las entregas fallidas, las reprogramaciones, las notificaciones, las alertas SLA, los indicadores y el reprocesamiento de eventos.
+
+Al ejecutar las pruebas automáticas se obtuvieron 26 verificaciones correctas.
