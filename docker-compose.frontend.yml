@@ -1,0 +1,19 @@
+services:
+  frontend:
+    build:
+      context: ./rutasur-frontend
+      dockerfile: Dockerfile
+    image: rutasur-frontend:local
+    container_name: rutasur-frontend
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+      simulador:
+        condition: service_started
+    environment:
+      MONGO_URI: mongodb://mongo:27017/rutasur?replicaSet=rs0
+      SIMULADOR_URL: http://simulador:4000
+      NODE_ENV: production
+    ports:
+      - "3000:3000"

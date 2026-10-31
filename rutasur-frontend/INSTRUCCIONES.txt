@@ -1,0 +1,27 @@
+FRONTEND BASICO RUTASUR - INSTRUCCIONES
+
+1) Extraer la carpeta rutasur-frontend dentro de C:\proyectos\tp7-rutasur.
+   Debe quedar: C:\proyectos\tp7-rutasur\rutasur-frontend
+
+2) Copiar el archivo docker-compose.frontend.yml a C:\proyectos\tp7-rutasur\
+   (al mismo nivel que docker-compose.yml).
+
+3) Abrir PowerShell en C:\proyectos\tp7-rutasur y ejecutar:
+   docker compose -f docker-compose.yml -f docker-compose.frontend.yml up -d --build frontend
+
+4) Esperar que termine de construir y abrir:
+   http://localhost:3000
+
+PANTALLAS:
+   http://localhost:3000/             Torre de control
+   http://localhost:3000/tracking     Tracking público
+   http://localhost:3000/analitica    Analítica
+   http://localhost:3000/demo         Panel de demostración
+
+Para buscar un envío desde la torre, hacer clic sobre su identificador.
+
+IMPORTANTE:
+- No modifica los archivos del backend ni su docker-compose.yml original.
+- No ejecutar docker compose down -v.
+- Para detener solo el frontend:
+  docker compose -f docker-compose.yml -f docker-compose.frontend.yml stop frontend
